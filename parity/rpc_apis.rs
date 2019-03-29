@@ -85,6 +85,8 @@ pub enum Api {
 	Debug,
 	/// Parity Transactions pool PubSub
 	ParityTransactionsPool,
+	/// Clique (Safe)
+	Clique,
 }
 
 impl FromStr for Api {
@@ -94,6 +96,7 @@ impl FromStr for Api {
 		use self::Api::*;
 
 		match s {
+			"clique" => Ok(Clique),
 			"debug" => Ok(Debug),
 			"eth" => Ok(Eth),
 			"net" => Ok(Net),
@@ -178,6 +181,7 @@ fn to_modules(apis: &HashSet<Api>) -> BTreeMap<String, String> {
 	let mut modules = BTreeMap::new();
 	for api in apis {
 		let (name, version) = match *api {
+			Api::Clique => ("clique", "1.0"),
 			Api::Debug => ("debug", "1.0"),
 			Api::Eth => ("eth", "1.0"),
 			Api::EthPubSub => ("pubsub", "1.0"),
@@ -476,6 +480,9 @@ impl FullDependencies {
 							.to_delegate(),
 					);
 				}
+				Api::Clique => {
+					handler.extend_with(CliqueClient::new().to_delegate())
+				}
 			}
 		}
 	}
@@ -716,6 +723,9 @@ impl<C: LightChainClient + 'static> LightDependencies<C> {
 						handler.extend_with(PrivateClient::new(private_tx_service).to_delegate());
 					}
 				}
+				Api::Clique => {
+					handler.extend_with(CliqueClient::new().to_delegate())
+				}
 			}
 		}
 	}
@@ -753,6 +763,7 @@ impl ApiSet {
 			Api::Whisper,
 			Api::WhisperPubSub,
 			Api::Private,
+			Api::Clique,
 		]
 			.into_iter()
 			.cloned()
@@ -783,6 +794,7 @@ impl ApiSet {
 				public_list.insert(Api::Personal);
 				public_list.insert(Api::SecretStore);
 				public_list.insert(Api::ParityTransactionsPool);
+				public_list.insert(Api::Clique);
 				public_list
 			}
 			ApiSet::PubSub => [
@@ -823,6 +835,7 @@ mod test {
 		assert_eq!(Api::Whisper, "shh".parse().unwrap());
 		assert_eq!(Api::WhisperPubSub, "shh_pubsub".parse().unwrap());
 		assert_eq!(Api::ParityTransactionsPool, "parity_transactions_pool".parse().unwrap());
+		assert_eq!(Api::Clique, "clique".parse().unwrap());
 		assert!("rp".parse::<Api>().is_err());
 	}
 
@@ -855,6 +868,7 @@ mod test {
 			Api::WhisperPubSub,
 			Api::Private,
 			Api::ParityTransactionsPool,
+			Api::Clique,
 		].into_iter()
 		.collect();
 		assert_eq!(ApiSet::UnsafeContext.list_apis(), expected);

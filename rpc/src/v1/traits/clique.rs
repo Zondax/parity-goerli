@@ -19,10 +19,12 @@
 use jsonrpc_core::Result;
 use jsonrpc_derive::rpc;
 use std::collections::BTreeMap;
-use v1::types::{BlockNumber, H160, H256};
+use ethereum_types::{H160, H256};
 
-type Snapshot = u8;      // TODO: Matching type for Snapshots seems to be missing
-type Address = H160;
+use v1::types::BlockNumber;
+
+pub type Snapshot = u8;      // TODO: Matching type for Snapshots seems to be missing
+pub type Address = H160;
 
 /// Clique rpc interface.
 #[rpc]
