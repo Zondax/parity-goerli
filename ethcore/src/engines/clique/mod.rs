@@ -230,7 +230,6 @@ impl Clique {
 	}
 
 	fn sign_header(&self, header: &Header) -> Result<(Signature, H256), Error> {
-
 		match self.signer.read().as_ref() {
 			None => {
 				Err(EngineError::RequiresSigner)?
@@ -245,12 +244,11 @@ impl Clique {
 		}
 	}
 
-    /// Construct a new state from given checkpoint header.
-    fn new_checkpoint_state(&self, header: &Header) -> Result<CliqueBlockState, Error> {
-        debug_assert_eq!(header.number() % self.epoch_length, 0);
+	/// Construct a new state from given checkpoint header.
+	fn new_checkpoint_state(&self, header: &Header) -> Result<CliqueBlockState, Error> {
+		debug_assert_eq!(header.number() % self.epoch_length, 0);
 
-		let mut state = CliqueBlockState::new(
-			extract_signers(header)?);
+		let mut state = CliqueBlockState::new(extract_signers(header)?);
 
 		// TODO(niklasad1): refactor to perform this check in the `CliqueBlockState` constructor instead
 		state.calc_next_timestamp(header.timestamp(), self.period)?;
@@ -259,6 +257,7 @@ impl Clique {
 	}
 
 	fn state_no_backfill(&self, hash: &H256) -> Option<CliqueBlockState> {
+		// FIXME: Remove??
 		self.block_state_by_hash.write().get_mut(hash).cloned()
 	}
 
@@ -266,106 +265,126 @@ impl Clique {
 	fn state(&self, header: &Header) -> Result<CliqueBlockState, Error> {
 		// TODO: Split and simplify this function. Allow retrieving by hash / block_number (keep private)
 
+		let block_number = header.number();
+		let block_hash = header.hash();
+
+		//////
+
 		let mut block_state_by_hash = self.block_state_by_hash.write();
-		if let Some(state) = block_state_by_hash.get_mut(&header.hash()) {
+		if let Some(state) = block_state_by_hash.get_mut(&block_hash) {
 			return Ok(state.clone());
 		}
+
 		// If we are looking for an checkpoint block state, we can directly reconstruct it.
-		if header.number() % self.epoch_length == 0 {
+		if block_number % self.epoch_length == 0 {
 			let state = self.new_checkpoint_state(header)?;
-			block_state_by_hash.insert(header.hash(), state.clone());
+			block_state_by_hash.insert(block_hash, state.clone());
 			return Ok(state);
 		}
 
 		// BlockState is not found in memory, which means we need to reconstruct state from last checkpoint.
-		match self.client.read().as_ref().and_then(|w| w.upgrade()) {
-			None => {
-				return Err(EngineError::RequiresClient)?;
+		let client = self.client.read().as_ref().and_then(|w| w.upgrade()).ok_or_else(|| EngineError::RequiresClient)?;
+
+		let last_checkpoint_number = block_number - block_number % self.epoch_length as u64;
+		debug_assert_ne!(last_checkpoint_number, block_number);
+
+		// Catching up state, note that we don't really store block state for intermediary blocks for speed.
+		let backfill_start = time::Instant::now();
+		trace!(target: "engine",
+				"Back-filling block state. last_checkpoint_number: {}, target: {}({}).",
+				last_checkpoint_number, header.number(), header.hash());
+
+		let capacity = block_number - last_checkpoint_number + 1;
+		let chain: &mut VecDeque<Header> = &mut VecDeque::with_capacity(capacity as usize);
+
+		// Put ourselves in.
+		chain.push_front(header.clone());
+
+		// populate chain to last checkpoint
+		loop {
+			let (last_parent_hash, last_num) = {
+				let l = chain.front().expect("chain has at least one element; qed");
+				(*l.parent_hash(), l.number())
+			};
+
+			if last_num == last_checkpoint_number + 1 {
+				break;
 			}
-			Some(c) => {
-				let last_checkpoint_number = header.number() - header.number() % self.epoch_length as u64;
-				debug_assert_ne!(last_checkpoint_number, header.number());
 
-				// Catching up state, note that we don't really store block state for intermediary blocks,
-				// for speed.
-				let backfill_start = time::Instant::now();
-				trace!(target: "engine",
-						"Back-filling block state. last_checkpoint_number: {}, target: {}({}).",
-						last_checkpoint_number, header.number(), header.hash());
-
-				let mut chain: &mut VecDeque<Header> = &mut VecDeque::with_capacity(
-					(header.number() - last_checkpoint_number + 1) as usize);
-
-				// Put ourselves in.
-				chain.push_front(header.clone());
-
-				// populate chain to last checkpoint
-				loop {
-					let (last_parent_hash, last_num) = {
-						let l = chain.front().expect("chain has at least one element; qed");
-						(*l.parent_hash(), l.number())
-					};
-
-					if last_num == last_checkpoint_number + 1 {
-						break;
-					}
-					match c.block_header(BlockId::Hash(last_parent_hash)) {
-						None => {
-							return Err(BlockError::UnknownParent(last_parent_hash))?;
-						}
-						Some(next) => {
-							chain.push_front(next.decode()?);
-						}
-					}
-				}
-
-				// Get the state for last checkpoint.
-				let last_checkpoint_hash = *chain.front()
-					.expect("chain has at least one element; qed")
-					.parent_hash();
-
-				let last_checkpoint_header = match c.block_header(BlockId::Hash(last_checkpoint_hash)) {
-					None => return Err(EngineError::CliqueMissingCheckpoint(last_checkpoint_hash))?,
-					Some(header) => header.decode()?,
-				};
-
-				let last_checkpoint_state = match block_state_by_hash.get_mut(&last_checkpoint_hash) {
-					Some(state) => state.clone(),
-					None => self.new_checkpoint_state(&last_checkpoint_header)?,
-				};
-
-				block_state_by_hash.insert(last_checkpoint_header.hash(), last_checkpoint_state.clone());
-
-				// Backfill!
-				let mut new_state = last_checkpoint_state.clone();
-				for item in chain {
-					new_state.apply(item, false)?;
-				}
-				new_state.calc_next_timestamp(header.timestamp(), self.period)?;
-				block_state_by_hash.insert(header.hash(), new_state.clone());
-
-				let elapsed = backfill_start.elapsed();
-				trace!(target: "engine", "Back-filling succeed, took {} ms.", elapsed.as_millis());
-				Ok(new_state)
-			}
+			let query = BlockId::Hash(last_parent_hash);
+			let next_header = client.block_header(query).ok_or_else(|| BlockError::UnknownParent(last_parent_hash))?;
+			chain.push_front(next_header.decode()?);
 		}
+
+		// Get the state for last checkpoint.
+		let last_checkpoint_hash = *chain.front()
+			.expect("chain has at least one element; qed")
+			.parent_hash();
+
+		let last_checkpoint_header = match client.block_header(BlockId::Hash(last_checkpoint_hash)) {
+			None => return Err(EngineError::CliqueMissingCheckpoint(last_checkpoint_hash))?,
+			Some(header) => header.decode()?,
+		};
+
+		let last_checkpoint_state = match block_state_by_hash.get_mut(&last_checkpoint_hash) {
+			Some(state) => state.clone(),
+			None => self.new_checkpoint_state(&last_checkpoint_header)?,
+		};
+
+		block_state_by_hash.insert(last_checkpoint_header.hash(), last_checkpoint_state.clone());
+
+		// Backfill!
+		let mut new_state = last_checkpoint_state.clone();
+		for item in chain {
+			new_state.apply(item, false)?;
+		}
+		new_state.calc_next_timestamp(header.timestamp(), self.period)?;
+		block_state_by_hash.insert(header.hash(), new_state.clone());
+
+		let elapsed = backfill_start.elapsed();
+		trace!(target: "engine", "Back-filling succeed, took {} ms.", elapsed.as_millis());
+
+		Ok(new_state)
 	}
 
-    pub fn get_signers_at_hash(&self, hash: &H256) -> Result<Vec<Address>, Error> {
-        // FIXME: Complete implementation
-        // TODO: Find corresponding header
-        let h = Header::default();
+	// TODO(jleni): Move Snapshot type here
+	// TODO(jleni): Directly return snapshots (they include state + block_number + hash)
+//	fn snapshot_from(header: types::header::Header, state: CliqueBlockState) -> Result<Snapshot> {
+//		// FIXME(jleni): Use correct errors
+//		// let number = header.number.ok_or(unimplemented(None))? as u64;
+//		let number = 0;
+//		let hash = header.hash();
+//		let signers = state.signers.iter().map(|x| *x).collect();
+//		let recents = state.recent_signers.iter().map(|x| *x).collect();
+//
+//		// FIXME(jleni):
+//		let votes = state.votes_history;
+//		let tally = BTreeMap::new();
+//
+//		Ok(Snapshot { number, hash, signers, recents, votes, tally })
+//	}
 
-        let tmp = self.state(&h);
+	pub fn find_header(&self, query: BlockId) -> Result<Header, Error> {
+		let client = self.client.read().as_ref().and_then(|w| w.upgrade()).ok_or(EngineError::RequiresClient)?;
+		let header = client.block_header(query).ok_or_else(|| "block not found")?.decode()?;
+		Ok(header)
+	}
 
-        let signers = extract_signers(&h)?;
-        let answer: Vec<Address> = signers.iter().map(|x| *x).collect();
+	pub fn get_state(&self, query: BlockId) -> Result<CliqueBlockState, Error> {
+		let header = self.find_header(query)?;
+		let state = self.state(&header)?;
+		Ok(state)
+	}
 
-        Ok(answer)
+	pub fn get_signers(&self, query: BlockId) -> Result<Vec<Address>, Error> {
+		let header = self.find_header(query)?;
+		let signers = extract_signers(&header)?;
+		let answer: Vec<Address> = signers.iter().map(|x| *x).collect();
+		Ok(answer)
 	}
 }
 
-impl Engine<EthereumMachine> for Clique {
+	impl Engine<EthereumMachine> for Clique {
 	fn name(&self) -> &str { "Clique" }
 
 	fn machine(&self) -> &EthereumMachine { &self.machine }
@@ -430,7 +449,7 @@ impl Engine<EthereumMachine> for Clique {
 			Err(BlockError::ExtraDataOutOfBounds(OutOfBounds {
 				min: Some(VANITY_LENGTH),
 				max: Some(VANITY_LENGTH),
-				found: header.extra_data().len()
+				found: header.extra_data().len(),
 			}))?;
 		}
 		// vanity
@@ -496,7 +515,7 @@ impl Engine<EthereumMachine> for Clique {
 			match self.state(&parent) {
 				Err(e) => {
 					warn!(target: "engine", "generate_seal: can't get parent state(number: {}, hash: {}): {} ",
-							parent.number(), parent.hash(), e);
+						  parent.number(), parent.hash(), e);
 					return Seal::None;
 				}
 				Ok(state) => {
@@ -520,21 +539,21 @@ impl Engine<EthereumMachine> for Clique {
 					// Wait for the right moment.
 					if now < limit {
 						trace!(target: "engine",
-								"generate_seal: sleeping to sign: inturn: {}, now: {:?}, to: {:?}.",
-								inturn, now, limit);
+							   "generate_seal: sleeping to sign: inturn: {}, now: {:?}, to: {:?}.",
+							   inturn, now, limit);
 						match limit.duration_since(SystemTime::now()) {
 							Ok(duration) => {
 								thread::sleep(duration);
-							},
+							}
 							Err(e) => {
-								warn!(target:"engine", "generate_seal: unable to sleep, err: {}", e);
+								warn!(target: "engine", "generate_seal: unable to sleep, err: {}", e);
 								return Seal::None;
 							}
 						}
 					}
 
 					trace!(target: "engine", "generate_seal: seal ready for block {}, txs: {}.",
-							block.header.number(), block.transactions.len());
+						   block.header.number(), block.transactions.len());
 					return Seal::Regular(null_seal);
 				}
 			}
@@ -718,7 +737,7 @@ impl Engine<EthereumMachine> for Clique {
 			// it's just to ignore setting an correct difficulty here, we will check authorization in next step in generate_seal anyway.
 			if let Some(signer) = self.signer.read().as_ref() {
 				let state = match self.state(&parent) {
-					Err(e) =>  {
+					Err(e) => {
 						trace!(target: "engine", "populate_from_parent: Unable to find parent state: {}, ignored.", e);
 						return;
 					}
