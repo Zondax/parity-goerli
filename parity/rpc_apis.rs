@@ -482,7 +482,7 @@ impl FullDependencies {
 				}
 				Api::Clique => {
 					// TODO: Only extend if clique is running
-					handler.extend_with(CliqueClient::new().to_delegate())
+					handler.extend_with(CliqueClient::new(&self.client).to_delegate())
 				}
 			}
 		}
@@ -725,8 +725,7 @@ impl<C: LightChainClient + 'static> LightDependencies<C> {
 					}
 				}
 				Api::Clique => {
-					// TODO: Only extend if clique is running
-					handler.extend_with(CliqueClient::new().to_delegate())
+					// TODO: Support Clique API in light chain client
 				}
 			}
 		}
