@@ -34,6 +34,7 @@ pub mod signer;
 pub mod traces;
 pub mod transactions_pool;
 pub mod web3;
+pub mod clique;
 
 pub use self::debug::Debug;
 pub use self::eth::{Eth, EthFilter};
@@ -53,3 +54,4 @@ pub use self::signer::Signer;
 pub use self::traces::Traces;
 pub use self::transactions_pool::TransactionsPool;
 pub use self::web3::Web3;
+pub use self::clique::Clique;
